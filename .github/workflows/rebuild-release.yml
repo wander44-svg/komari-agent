@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        goarch: [amd64, arm64, "386", arm]
+        goarch: [amd64, arm64]
 
     steps:
       - name: Checkout custom branch
