@@ -3,7 +3,7 @@ name: Build on Main
 on:
   push:
     branches:
-      - main
+      - komari-optimal
 
 jobs:
   build:
@@ -11,15 +11,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        exclude:
-          - goos: windows
-            goarch: arm
-          - goos: darwin
-            goarch: 386
-          - goos: darwin
-            goarch: arm
-        goos: [windows, linux, darwin, freebsd]
-        goarch: [amd64, arm64, 386, arm]
+        goos: [linux]
+        goarch: [amd64, arm64]
 
     steps:
       - name: Checkout code
@@ -38,9 +31,6 @@ jobs:
           VERSION: ${{ github.sha }}
         run: |
           BINARY_NAME=komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            BINARY_NAME=${BINARY_NAME}.exe
-          fi
           go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $BINARY_NAME
 
       - name: Upload artifact

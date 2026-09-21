@@ -42,36 +42,17 @@ github_proxy=""
 install_version="" # New parameter for specifying version
  
 
-# Detect OS
+# Linux-only monitoring agent. Other operating systems are rejected before
+# any download or modification.
 os_type=$(uname -s)
-case $os_type in
-    Darwin)
-        os_name="darwin"
-        target_dir="/usr/local/komari"  # Use /usr/local on macOS
-        # Check if we can write to /usr/local, fallback to user directory
-        if [ ! -w "/usr/local" ] && [ "$EUID" -ne 0 ]; then
-            target_dir="$HOME/.komari"
-            log_info "No write permission to /usr/local, using user directory: $target_dir"
-        fi
-        ;;
-    Linux)
-        os_name="linux"
-        ;;
-    FreeBSD)
-        os_name="freebsd"
-        ;;
-    MINGW*|MSYS*|CYGWIN*)
-        os_name="windows"
-        target_dir="/c/komari"  # Use C:\komari on Windows
-        ;;
-    *)
-        log_error "Unsupported operating system: $os_type"
-        exit 1
-        ;;
-esac
+if [ "$os_type" != "Linux" ]; then
+    log_error "Unsupported operating system: $os_type (Linux only)"
+    exit 1
+fi
+os_name="linux"
 
 # Parse install-specific arguments
-komari_args=""
+komari_args=()
 while [[ $# -gt 0 ]]; do
     case $1 in
         --install-dir)
@@ -96,14 +77,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             # Non-install arguments go to komari_args
-            komari_args="$komari_args $1"
+            komari_args+=("$1")
             shift
             ;;
     esac
 done
-
-# Remove leading space from komari_args if present
-komari_args="${komari_args# }"
 
 komari_agent_path="${target_dir}/agent"
 
@@ -128,7 +106,7 @@ log_config "Installation configuration:"
 log_config "  Service name: ${GREEN}$service_name${NC}"
 log_config "  Install directory: ${GREEN}$target_dir${NC}"
 log_config "  GitHub proxy: ${GREEN}${github_proxy:-"(direct)"}${NC}"
-log_config "  Binary arguments: ${GREEN}$komari_args${NC}"
+log_config "  Binary arguments: configured (sensitive values hidden)"
 if [ -n "$install_version" ]; then
     log_config "  Specified agent version: ${GREEN}$install_version${NC}"
 else
@@ -448,7 +426,7 @@ elif [ "$init_system" = "openrc" ]; then
 name="Komari Agent Service"
 description="Komari monitoring agent"
 command="${komari_agent_path}"
-command_args="${komari_args}"
+command_args="${komari_args[@]@Q}"
 command_user="root"
 directory="${target_dir}"
 pidfile="/run/${service_name}.pid"
@@ -477,7 +455,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${komari_agent_path} ${komari_args}
+ExecStart=${komari_agent_path} ${komari_args[@]@Q}
 WorkingDirectory=${target_dir}
 Restart=always
 User=root
@@ -504,7 +482,7 @@ STOP=10
 USE_PROCD=1
 
 PROG="${komari_agent_path}"
-ARGS="${komari_args}"
+ARGS="${komari_args[@]@Q}"
 
 start_service() {
     procd_open_instance
@@ -631,7 +609,7 @@ end script
 
 # Start
 script
-    exec ${komari_agent_path} ${komari_args}
+    exec ${komari_agent_path} ${komari_args[@]@Q}
 end script
 EOF
     # enable Upstart unit
@@ -654,5 +632,5 @@ else
     log_success "Komari-agent installation completed!"
 fi
 log_config "Service: ${GREEN}$service_name${NC}"
-log_config "Arguments: ${GREEN}$komari_args${NC}"
+log_config "Arguments: configured (sensitive values hidden)"
 echo -e "${WHITE}===========================================${NC}"

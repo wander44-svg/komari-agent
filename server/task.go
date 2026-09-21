@@ -30,10 +30,9 @@ func NewTask(task_id, command string) {
 		uploadTaskResult(task_id, "No command provided", 0, time.Now())
 		return
 	}
-	if flags.DisableWebSsh {
-		uploadTaskResult(task_id, "Remote control is disabled.", -1, time.Now())
-		return
-	}
+	// Remote command execution is intentionally disabled in the monitoring-only agent.
+	uploadTaskResult(task_id, "Remote control is not supported.", -1, time.Now())
+	return
 	log.Printf("Executing task %s with command: %s", task_id, command)
 	result, exitCode := runTaskCommand(command)
 	uploadTaskResult(task_id, result, exitCode, time.Now())

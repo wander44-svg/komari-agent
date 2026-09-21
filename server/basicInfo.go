@@ -77,29 +77,16 @@ func uploadBasicInfo() error {
 }
 
 func tryUploadData(data map[string]interface{}) error {
-	protocolVersion := uploadProtocolVersion()
-	if protocolVersion >= 2 {
-		err := tryUploadDataWithProtocol(data, 2)
-		if shouldFallbackToV1(2, err) {
-			log.Printf("v2 basic info failed %d consecutive protocol attempts, falling back to v1", v2ProtocolFallbackThreshold)
-			setConnectionProtocolVersion(1)
-			return tryUploadDataWithProtocol(data, 1)
-		}
-		return err
-	}
-	return tryUploadDataWithProtocol(data, 1)
+	return tryUploadDataWithProtocol(data, 2)
 }
 
 func tryUploadDataWithProtocol(data map[string]interface{}, protocolVersion int) error {
-	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/uploadBasicInfo?token=" + flags.Token
+	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/v2/rpc"
 	payload, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	if protocolVersion >= 2 {
-		endpoint = strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/v2/rpc?token=" + flags.Token
-		payload = v2.BuildBasicInfoPayload(data)
-	}
+	payload = v2.BuildBasicInfoPayload(data)
 	body := payload
 	compressed := false
 	if protocolVersion >= 2 && !flags.DisableCompression {
@@ -114,6 +101,7 @@ func tryUploadDataWithProtocol(data map[string]interface{}, protocolVersion int)
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+flags.Token)
 	if compressed {
 		req.Header.Set("Content-Encoding", "gzip")
 	}
@@ -126,7 +114,7 @@ func tryUploadDataWithProtocol(data map[string]interface{}, protocolVersion int)
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return err
 	}

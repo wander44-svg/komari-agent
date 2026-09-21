@@ -91,11 +91,7 @@ func resetV2ProtocolFailures(protocolVersion int) {
 }
 
 func shouldFallbackToV1(protocolVersion int, err error) bool {
-	failures, fallback := noteV2AttemptResult(protocolVersion, err)
-	if !fallback {
-		return false
-	}
-	return failures >= v2ProtocolFallbackThreshold
+	return false
 }
 
 func parseV2Response(body []byte) (*v2.Response, error) {
@@ -121,10 +117,7 @@ func bodySnippet(body []byte) string {
 }
 
 func requestedProtocolVersion() int {
-	if flags.ProtocolVersion >= 2 {
-		return 2
-	}
-	return 1
+	return 2
 }
 
 var runtimeProtocolState struct {
@@ -150,10 +143,5 @@ func resetConnectionProtocolVersion() {
 }
 
 func uploadProtocolVersion() int {
-	runtimeProtocolState.RLock()
-	defer runtimeProtocolState.RUnlock()
-	if runtimeProtocolState.connectionProtocol > 0 {
-		return runtimeProtocolState.connectionProtocol
-	}
-	return requestedProtocolVersion()
+	return 2
 }

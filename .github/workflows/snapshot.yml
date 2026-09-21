@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - main
+      - komari-optimal
 
 permissions:
   contents: write
@@ -29,12 +29,12 @@ jobs:
 
       - name: Ensure snapshot target is main
         run: |
-          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
-            echo "Snapshot builds must run from refs/heads/main. Current ref: ${GITHUB_REF}"
+          if [ "${GITHUB_REF}" != "refs/heads/komari-optimal" ]; then
+            echo "Snapshot builds must run from refs/heads/komari-optimal. Current ref: ${GITHUB_REF}"
             exit 1
           fi
 
-          git fetch --no-tags --depth=1 origin main
+          git fetch --no-tags --depth=1 origin komari-optimal
           MAIN_SHA="$(git rev-parse FETCH_HEAD)"
 
           if [ "${GITHUB_SHA}" != "${MAIN_SHA}" ]; then
@@ -64,15 +64,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        exclude:
-          - goos: windows
-            goarch: arm
-          - goos: darwin
-            goarch: 386
-          - goos: darwin
-            goarch: arm
-        goos: [windows, linux, darwin, freebsd]
-        goarch: [amd64, arm64, 386, arm]
+        goos: [linux]
+        goarch: [amd64, arm64]
 
     steps:
       - name: Checkout code
@@ -91,9 +84,6 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           BINARY_NAME=komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            BINARY_NAME=${BINARY_NAME}.exe
-          fi
           go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $BINARY_NAME
 
       - name: Upload binary as artifact
@@ -113,7 +103,7 @@ jobs:
 
       - name: Ensure commit is still current main
         run: |
-          git fetch --no-tags --depth=1 origin main
+          git fetch --no-tags --depth=1 origin komari-optimal
           MAIN_SHA="$(git rev-parse FETCH_HEAD)"
 
           if [ "${GITHUB_SHA}" != "${MAIN_SHA}" ]; then
@@ -179,7 +169,7 @@ jobs:
 
       - name: Ensure commit is still current main
         run: |
-          git fetch --no-tags --depth=1 origin main
+          git fetch --no-tags --depth=1 origin komari-optimal
           MAIN_SHA="$(git rev-parse FETCH_HEAD)"
 
           if [ "${GITHUB_SHA}" != "${MAIN_SHA}" ]; then
