@@ -51,6 +51,9 @@ func (sc *SafeConn) SetReadDeadline(t time.Time) error {
 	// defer sc.mu.Unlock()
 	return sc.conn.SetReadDeadline(t)
 }
+func (sc *SafeConn) SetReadLimit(limit int64) {
+	sc.conn.SetReadLimit(limit)
+}
 func (sc *SafeConn) GetConn() *websocket.Conn {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
