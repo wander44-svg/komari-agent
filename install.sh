@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# Keep this installer in Unix LF format so it runs directly on Linux.
+
 # Color definitions for terminal output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
