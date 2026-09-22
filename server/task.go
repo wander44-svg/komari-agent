@@ -366,7 +366,7 @@ func postV2RPC(payload interface{}) error {
 	if err != nil {
 		return err
 	}
-	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/v2/rpc?token=" + flags.Token
+	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/v2/rpc"
 	compressed := false
 	if !flags.DisableCompression {
 		if gz, err := gzipBytes(body); err == nil {
@@ -379,6 +379,7 @@ func postV2RPC(payload interface{}) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+flags.Token)
 	if compressed {
 		req.Header.Set("Content-Encoding", "gzip")
 	}
