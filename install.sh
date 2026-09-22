@@ -40,8 +40,6 @@ log_config() {
 # Default values
 service_name="komari-agent"
 target_dir="/opt/komari"
-github_proxy=""
-install_version="" # New parameter for specifying version
  
 
 # Linux-only monitoring agent. Other operating systems are rejected before
@@ -63,14 +61,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --install-service-name)
             service_name="$2"
-            shift 2
-            ;;
-        --install-ghproxy)
-            github_proxy="$2"
-            shift 2
-            ;;
-        --install-version)
-            install_version="$2"
             shift 2
             ;;
         --install*)
@@ -107,13 +97,8 @@ echo ""
 log_config "Installation configuration:"
 log_config "  Service name: ${GREEN}$service_name${NC}"
 log_config "  Install directory: ${GREEN}$target_dir${NC}"
-log_config "  GitHub proxy: ${GREEN}${github_proxy:-"(direct)"}${NC}"
 log_config "  Binary arguments: configured (sensitive values hidden)"
-if [ -n "$install_version" ]; then
-    log_config "  Specified agent version: ${GREEN}$install_version${NC}"
-else
-    log_config "  Agent version: ${GREEN}Latest${NC}"
-fi
+log_config "  Agent channel: ${GREEN}Latest Snapshot${NC}"
 echo ""
 
 # Function to uninstall the previous installation
@@ -259,41 +244,28 @@ case $arch in
 esac
 log_info "Detected OS: ${GREEN}$os_name${NC}, Architecture: ${GREEN}$arch${NC}"
 
-version_to_install="latest"
-if [ -n "$install_version" ]; then
-    log_info "Attempting to install specified version: ${GREEN}$install_version${NC}"
-    version_to_install="$install_version"
-else
-    log_info "No version specified, installing the latest version."
+# Resolve the newest Linux-only optimal snapshot. GitHub's latest/download
+# endpoint ignores prereleases, so it cannot be used for this branch.
+log_info "Resolving latest Snapshot release..."
+snapshot_tag=$(curl -fsSL "https://api.github.com/repos/wander44-svg/komari-agent/releases" \
+    | grep '"tag_name"' \
+    | grep 'Snapshot-' \
+    | head -1 \
+    | sed -e 's/.*"tag_name": *"//' -e 's/".*//')
+if [ -z "$snapshot_tag" ]; then
+    log_error "Unable to resolve the latest Snapshot release"
+    exit 1
 fi
 
-# Construct download URL
 file_name="komari-agent-${os_name}-${arch}"
-if [ "$version_to_install" = "latest" ]; then
-    download_path="latest/download"
-else
-    download_path="download/${version_to_install}"
-fi
-
-if [ -n "$github_proxy" ]; then
-    # Use proxy for GitHub releases
-    download_url="${github_proxy}/https://github.com/wander44-svg/komari-agent/releases/${download_path}/${file_name}"
-else
-    # Direct access to GitHub releases
-    download_url="https://github.com/wander44-svg/komari-agent/releases/${download_path}/${file_name}"
-fi
+download_url="https://github.com/wander44-svg/komari-agent/releases/download/${snapshot_tag}/${file_name}"
 
 log_step "Creating installation directory: ${GREEN}$target_dir${NC}"
 mkdir -p "$target_dir"
 
 # Download binary
-if [ -n "$github_proxy" ]; then
-    log_step "Downloading $file_name via proxy..."
-    log_info "URL: ${CYAN}$download_url${NC}"
-else
-    log_step "Downloading $file_name directly..."
-    log_info "URL: ${CYAN}$download_url${NC}"
-fi
+log_step "Downloading $file_name (${snapshot_tag}) directly..."
+log_info "URL: ${CYAN}$download_url${NC}"
 if ! curl -L -o "$komari_agent_path" "$download_url"; then
     log_error "Download failed"
     exit 1
