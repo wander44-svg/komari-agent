@@ -43,7 +43,7 @@ jobs:
         run: |
           set -euxo pipefail
           BINARY_NAME="komari-agent-linux-${GOARCH}"
-          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o "${BINARY_NAME}"
+          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/version.CurrentVersion=${VERSION}" -o "${BINARY_NAME}"
 
       - name: Replace release asset
         env:

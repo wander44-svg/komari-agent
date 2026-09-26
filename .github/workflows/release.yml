@@ -34,7 +34,7 @@ jobs:
           VERSION: ${{ github.event.release.tag_name }}
         run: |
           BINARY_NAME=komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
-            go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $BINARY_NAME
+            go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/version.CurrentVersion=${VERSION}" -o $BINARY_NAME
 
       - name: Upload binary to release
         env:

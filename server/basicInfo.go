@@ -13,7 +13,7 @@ import (
 	monitoring "github.com/komari-monitor/komari-agent/monitoring/unit"
 	"github.com/komari-monitor/komari-agent/protocol/transport"
 	v2 "github.com/komari-monitor/komari-agent/protocol/v2"
-	"github.com/komari-monitor/komari-agent/update"
+	"github.com/komari-monitor/komari-agent/version"
 
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 )
@@ -58,29 +58,13 @@ func uploadBasicInfo() error {
 		"disk_total":         monitoring.Disk().Total,
 		"gpu_name":           monitoring.GpuName(),
 		"virtualization":     monitoring.Virtualized(),
-		"version":            update.CurrentVersion,
+		"version":            version.CurrentVersion,
 	}
 
-	// 尝试上传完整数据
-	err := tryUploadData(data)
-	if err != nil {
-		// 兼容 <= 1.0.2
-		delete(data, "kernel_version")
-		// 兼容 <= 1.2.0
-		delete(data, "cpu_physical_cores")
-		err = tryUploadData(data)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+	return tryUploadData(data)
 }
 
 func tryUploadData(data map[string]interface{}) error {
-	return tryUploadDataWithProtocol(data, 2)
-}
-
-func tryUploadDataWithProtocol(data map[string]interface{}, protocolVersion int) error {
 	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/v2/rpc"
 	payload, err := json.Marshal(data)
 	if err != nil {
@@ -89,7 +73,7 @@ func tryUploadDataWithProtocol(data map[string]interface{}, protocolVersion int)
 	payload = v2.BuildBasicInfoPayload(data)
 	body := payload
 	compressed := false
-	if protocolVersion >= 2 && !flags.DisableCompression {
+	if !flags.DisableCompression {
 		if gz, err := transport.GzipBytes(payload); err == nil {
 			body = gz
 			compressed = true
@@ -123,13 +107,10 @@ func tryUploadDataWithProtocol(data map[string]interface{}, protocolVersion int)
 	if resp.StatusCode != http.StatusOK {
 		return &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status, Body: message}
 	}
-	if protocolVersion >= 2 {
-		if len(bytes.TrimSpace(respBody)) > 0 {
-			if _, err := parseV2Response(respBody); err != nil {
-				return err
-			}
+	if len(bytes.TrimSpace(respBody)) > 0 {
+		if _, err := parseV2Response(respBody); err != nil {
+			return err
 		}
-		resetV2ProtocolFailures(protocolVersion)
 	}
 
 	return nil

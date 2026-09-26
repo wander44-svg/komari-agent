@@ -1,7 +1,6 @@
 package flags_pkg
 
 type Config struct {
-	MemoryModeAvailable bool    `json:"memory_mode_available" env:"AGENT_MEMORY_MODE_AVAILABLE"`   // [deprecated] 已弃用，请使用 MemoryIncludeCache
 	Token               string  `json:"token" env:"AGENT_TOKEN"`                                   // Token
 	Endpoint            string  `json:"endpoint" env:"AGENT_ENDPOINT"`                             // 面板地址
 	Interval            float64 `json:"interval" env:"AGENT_INTERVAL"`                             // 数据采集间隔，单位秒
@@ -24,10 +23,6 @@ type Config struct {
 	ConfigFile          string  `json:"config_file" env:"AGENT_CONFIG_FILE"`                       // JSON配置文件路径
 	DisableCompression  bool    `json:"disable_compression" env:"AGENT_DISABLE_COMPRESSION"`       // 禁用v2传输压缩
 	PreferIPVersion     string  `json:"prefer_ip_version" env:"AGENT_PREFER_IP_VERSION"`           // 面板连接优先使用的 IP 版本：4 或 6
-	// ProtocolVersion is retained only for source compatibility with old tests;
-	// runtime communication is always v2 and no CLI flag is exposed.
-	ProtocolVersion     int     `json:"-" env:"-"`
-
 }
 
 var GlobalConfig = &Config{}

@@ -53,8 +53,30 @@ os_name="linux"
 
 # Parse install-specific arguments
 komari_args=()
+agent_token=""
+agent_endpoint=""
 while [[ $# -gt 0 ]]; do
     case $1 in
+		-t|--token)
+			agent_token="${2:-}"
+			shift 2
+			;;
+		--token=*)
+			agent_token="${1#*=}"
+			shift
+			;;
+		-e|--endpoint)
+			agent_endpoint="${2:-}"
+			shift 2
+			;;
+		--endpoint=*)
+			agent_endpoint="${1#*=}"
+			shift
+			;;
+		--config)
+			log_error "The installer manages its own protected configuration file"
+			exit 1
+			;;
         --install-dir)
             target_dir="$2"
             shift 2
@@ -75,17 +97,45 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-komari_agent_path="${target_dir}/agent"
-
-# macOS doesn't always require sudo for everything
-if [ "$os_name" = "darwin" ] && command -v brew >/dev/null 2>&1; then
-    # On macOS with Homebrew, we can run without root for dependencies
-    require_root_for_deps=false
-else
-    require_root_for_deps=true
+if [[ ! "$target_dir" =~ ^/[A-Za-z0-9._/@+-]+$ ]]; then
+	log_error "Install directory must be an absolute path using safe characters only"
+    exit 1
+fi
+# Service and installation paths are later interpolated into privileged service
+# definitions. Reject shell metacharacters before any root-owned filesystem
+# changes are made.
+if [[ ! "$service_name" =~ ^[A-Za-z0-9_.@-]+$ ]]; then
+    log_error "Invalid service name"
+    exit 1
 fi
 
-if [ "$EUID" -ne 0 ] && [ "$require_root_for_deps" = true ]; then
+komari_agent_path="${target_dir}/agent"
+config_path="${target_dir}/agent.json"
+
+if [ -z "$agent_endpoint" ]; then
+    read -r -p "Komari endpoint: " agent_endpoint </dev/tty
+fi
+if [ -z "$agent_token" ]; then
+    read -r -s -p "Agent token: " agent_token </dev/tty
+    echo ""
+fi
+if [ -z "$agent_endpoint" ] || [ -z "$agent_token" ]; then
+    log_error "Endpoint and token are required"
+    exit 1
+fi
+case "$agent_endpoint" in
+    http://*|https://*) ;;
+    *)
+        log_error "Endpoint must start with http:// or https://"
+        exit 1
+        ;;
+esac
+if [[ "$agent_endpoint" == *$'\n'* || "$agent_endpoint" == *$'\r'* || "$agent_endpoint" == *$'\t'* || "$agent_token" == *$'\n'* || "$agent_token" == *$'\r'* || "$agent_token" == *$'\t'* ]]; then
+	log_error "Endpoint and token must not contain control characters"
+    exit 1
+fi
+
+if [ "$EUID" -ne 0 ]; then
     log_error "Please run as root"
     exit 1
 fi
@@ -126,23 +176,7 @@ uninstall_previous() {
         log_info "Stopping and removing existing upstart service..."
         initctl stop ${service_name}
         rm -f "/etc/init/${service_name}.conf"
-    elif [ "$os_name" = "darwin" ] && command -v launchctl >/dev/null 2>&1; then
-        # macOS launchd service - check both system and user locations
-        system_plist="/Library/LaunchDaemons/com.komari.${service_name}.plist"
-        user_plist="$HOME/Library/LaunchAgents/com.komari.${service_name}.plist"
-        
-        if [ -f "$system_plist" ]; then
-            log_info "Stopping and removing existing system launchd service..."
-            launchctl bootout system "$system_plist" 2>/dev/null || true
-            rm -f "$system_plist"
-        fi
-        
-        if [ -f "$user_plist" ]; then
-            log_info "Stopping and removing existing user launchd service..."
-            launchctl bootout gui/$(id -u) "$user_plist" 2>/dev/null || true
-            rm -f "$user_plist"
-        fi
-    fi
+	fi
     
     # Remove old binary if it exists
     if [ -f "$komari_agent_path" ]; then
@@ -204,7 +238,7 @@ install_dependencies
 
  
 
-# Architecture detection with platform-specific support
+# Only the published Linux targets are supported.
 arch=$(uname -m)
 case $arch in
     x86_64)
@@ -212,30 +246,6 @@ case $arch in
         ;;
     aarch64|arm64)
         arch="arm64"
-        ;;
-    i386|i686)
-        # x86 (32-bit) support
-        case $os_name in
-            freebsd|linux|windows)
-                arch="386"
-                ;;
-            *)
-                log_error "32-bit x86 architecture not supported on $os_name"
-                exit 1
-                ;;
-        esac
-        ;;
-    armv7*|armv6*)
-        # ARM 32-bit support
-        case $os_name in
-            freebsd|linux)
-                arch="arm"
-                ;;
-            *)
-                log_error "32-bit ARM architecture not supported on $os_name"
-                exit 1
-                ;;
-        esac
         ;;
     *)
         log_error "Unsupported architecture: $arch on $os_name"
@@ -263,10 +273,24 @@ download_url="https://github.com/wander44-svg/komari-agent/releases/download/${s
 log_step "Creating installation directory: ${GREEN}$target_dir${NC}"
 mkdir -p "$target_dir"
 
+json_escape() {
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# Keep credentials out of the service command line and process list.
+old_umask=$(umask)
+umask 077
+printf '{"endpoint":"%s","token":"%s"}\n' \
+    "$(json_escape "$agent_endpoint")" \
+    "$(json_escape "$agent_token")" > "$config_path"
+chmod 600 "$config_path"
+umask "$old_umask"
+runtime_args=("--config" "$config_path" "${komari_args[@]}")
+
 # Download binary
 log_step "Downloading $file_name (${snapshot_tag}) directly..."
 log_info "URL: ${CYAN}$download_url${NC}"
-if ! curl -L -o "$komari_agent_path" "$download_url"; then
+if ! curl --fail --location --retry 3 --proto '=https' --tlsv1.2 -o "$komari_agent_path" "$download_url"; then
     log_error "Download failed"
     exit 1
 fi
@@ -338,12 +362,6 @@ detect_init_system() {
         return
     fi
     
-    # Check for macOS launchd
-    if [ "$os_name" = "darwin" ] && command -v launchctl >/dev/null 2>&1; then
-        echo "launchd"
-        return
-    fi
-    
     # Fallback: if systemctl exists and appears functional, assume systemd
     if command -v systemctl >/dev/null 2>&1; then
         if systemctl list-units >/dev/null 2>&1; then
@@ -381,7 +399,7 @@ if [ "$init_system" = "nixos" ]; then
     echo -e "${CYAN}  wantedBy = [ \"multi-user.target\" ];${NC}"
     echo -e "${CYAN}  serviceConfig = {${NC}"
     echo -e "${CYAN}    Type = \"simple\";${NC}"
-    echo -e "${CYAN}    ExecStart = \"${komari_agent_path} ${komari_args}\";${NC}"
+    echo -e "${CYAN}    ExecStart = \"${komari_agent_path} ${runtime_args[*]}\";${NC}"
     echo -e "${CYAN}    WorkingDirectory = \"${target_dir}\";${NC}"
     echo -e "${CYAN}    Restart = \"always\";${NC}"
     echo -e "${CYAN}    User = \"root\";${NC}"
@@ -400,7 +418,7 @@ elif [ "$init_system" = "openrc" ]; then
 name="Komari Agent Service"
 description="Komari monitoring agent"
 command="${komari_agent_path}"
-command_args="${komari_args[@]@Q}"
+command_args="${runtime_args[@]@Q}"
 command_user="root"
 directory="${target_dir}"
 pidfile="/run/${service_name}.pid"
@@ -429,7 +447,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${komari_agent_path} ${komari_args[@]@Q}
+ExecStart=${komari_agent_path} ${runtime_args[@]@Q}
 WorkingDirectory=${target_dir}
 Restart=always
 User=root
@@ -456,7 +474,7 @@ STOP=10
 USE_PROCD=1
 
 PROG="${komari_agent_path}"
-ARGS="${komari_args[@]@Q}"
+ARGS="${runtime_args[@]@Q}"
 
 start_service() {
     procd_open_instance
@@ -519,8 +537,8 @@ elif [ "$init_system" = "launchd" ]; then
 EOF
     
     # Add program arguments if provided
-    if [ -n "$komari_args" ]; then
-        echo "$komari_args" | xargs -n1 printf "        <string>%s</string>\n" >> "$plist_file"
+    if [ -n "$runtime_args" ]; then
+        printf '%s\n' "${runtime_args[@]}" | xargs -n1 printf "        <string>%s</string>\n" >> "$plist_file"
     fi
     
     cat >> "$plist_file" << EOF
@@ -583,7 +601,7 @@ end script
 
 # Start
 script
-    exec ${komari_agent_path} ${komari_args[@]@Q}
+    exec ${komari_agent_path} ${runtime_args[@]@Q}
 end script
 EOF
     # enable Upstart unit
@@ -592,7 +610,7 @@ EOF
     log_success "Upstart service configured and started"
 else
     log_error "Unsupported or unknown init system detected: $init_system"
-    log_error "Supported init systems: systemd, openrc, procd, launchd"
+	log_error "Supported init systems: systemd, openrc, procd, upstart"
     exit 1
 fi
 

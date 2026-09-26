@@ -18,7 +18,7 @@ import (
 	"github.com/komari-monitor/komari-agent/monitoring/netstatic"
 	monitoring "github.com/komari-monitor/komari-agent/monitoring/unit"
 	"github.com/komari-monitor/komari-agent/server"
-	"github.com/komari-monitor/komari-agent/update"
+	"github.com/komari-monitor/komari-agent/version"
 	"github.com/spf13/cobra"
 
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
@@ -33,6 +33,13 @@ var RootCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		loadFromEnv() // 从环境变量加载配置，覆盖解析
 		if flags.ConfigFile != "" {
+			info, err := os.Stat(flags.ConfigFile)
+			if err != nil {
+				return fmt.Errorf("failed to inspect config file: %w", err)
+			}
+			if info.Mode().Perm()&0o077 != 0 {
+				return fmt.Errorf("config file %s must not be readable or writable by group/others", flags.ConfigFile)
+			}
 			bytes, err := os.ReadFile(flags.ConfigFile)
 			if err != nil {
 				return fmt.Errorf("failed to read config file: %w", err)
@@ -41,6 +48,9 @@ var RootCmd = &cobra.Command{
 			if err != nil {
 				return fmt.Errorf("failed to parse config file: %w", err)
 			}
+		}
+		if strings.TrimSpace(flags.Endpoint) == "" || strings.TrimSpace(flags.Token) == "" {
+			return fmt.Errorf("endpoint and token are required")
 		}
 		if flags.PreferIPVersion != "" && flags.PreferIPVersion != "4" && flags.PreferIPVersion != "6" {
 			return fmt.Errorf("invalid --prefer-ip-version value %q: expected 4 or 6", flags.PreferIPVersion)
@@ -72,8 +82,8 @@ var RootCmd = &cobra.Command{
 			}
 		}
 
-		log.Println("Komari Agent", update.CurrentVersion)
-		log.Println("Github Repo:", update.Repo)
+		log.Println("Komari Agent", version.CurrentVersion)
+		log.Println("Github Repo:", version.Repo)
 
 		// 设置 DNS 解析行为
 		if flags.CustomDNS != "" {
@@ -108,20 +118,6 @@ var RootCmd = &cobra.Command{
 }
 
 func Execute() {
-	for i, arg := range os.Args {
-		if arg == "-autoUpdate" || arg == "--autoUpdate" {
-			log.Println("WARNING: The -autoUpdate flag is deprecated in version 0.0.9 and later. Use --disable-auto-update to configure auto-update behavior.")
-			// 从参数列表中移除该参数，防止cobra解析错误
-			os.Args = append(os.Args[:i], os.Args[i+1:]...)
-			break
-		}
-		if arg == "-memory-mode-available" || arg == "--memory-mode-available" {
-			//flags.MemoryIncludeCache = true
-			log.Println("WARNING: The --memory-mode-available flag is deprecated in version 1.0.70 and later. Use --memory-include-cache to report memory usage including cache/buffer.")
-			os.Args = append(os.Args[:i], os.Args[i+1:]...)
-		}
-	}
-
 	if err := RootCmd.Execute(); err != nil {
 		log.Println(err)
 		os.Exit(1)

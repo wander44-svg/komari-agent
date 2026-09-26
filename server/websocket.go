@@ -28,13 +28,14 @@ var (
 	v2SeenEvents  = make(map[string]struct{})
 )
 
+const maxV2SeenEvents = 4096
+
 func EstablishWebSocketConnection() {
 	var conn *ws.SafeConn
 	defer func() {
 		if conn != nil {
 			conn.Close()
 		}
-		resetConnectionProtocolVersion()
 	}()
 	var err error
 	interval := math.Max(1, flags.Interval)
@@ -45,8 +46,6 @@ func EstablishWebSocketConnection() {
 	heartbeatTicker := time.NewTicker(30 * time.Second)
 	defer heartbeatTicker.Stop()
 
-	nextProtocol := requestedProtocolVersion()
-	activeProtocol := 0
 	var readDone <-chan struct{}
 
 	for {
@@ -55,27 +54,18 @@ func EstablishWebSocketConnection() {
 			if conn == nil {
 				log.Println("Attempting to connect to WebSocket...")
 				retry := 0
-				connectProtocol := nextProtocol
 				for retry <= flags.MaxRetries {
 					if retry > 0 {
 						log.Println("Retrying websocket connection, attempt:", retry)
 					}
-					websocketEndpoint := buildWebSocketEndpoint(connectProtocol)
+					websocketEndpoint := buildWebSocketEndpoint()
 					conn, err = connectWebSocket(websocketEndpoint)
 					if err == nil {
-						activeProtocol = connectProtocol
-						nextProtocol = connectProtocol
-						setConnectionProtocolVersion(activeProtocol)
-						log.Printf("WebSocket connected using v%d protocol", activeProtocol)
+						log.Printf("WebSocket connected using v2 protocol")
 						done := make(chan struct{})
 						readDone = done
-						go handleWebSocketMessages(conn, activeProtocol, done)
+						go handleWebSocketMessages(conn, done)
 						break
-					} else if shouldFallbackToV1(connectProtocol, err) {
-						log.Printf("v2 WebSocket endpoint failed (%v), falling back to v1 until this connection is lost", err)
-						connectProtocol = 1
-						retry = 0
-						continue
 					} else {
 						log.Println("Failed to connect to WebSocket:", err)
 					}
@@ -85,44 +75,25 @@ func EstablishWebSocketConnection() {
 
 				if retry > flags.MaxRetries {
 					log.Println("Max retries reached.")
-					if connectProtocol < 2 {
-						return
-					}
-					conn, err = runPostFallback(buildWebSocketEndpoint(connectProtocol), interval)
+					conn, err = runPostFallback(buildWebSocketEndpoint(), interval)
 					if err != nil {
-						if connectProtocol >= 2 && isV2ProtocolFailure(err) {
-							log.Printf("v2 POST fallback failed (%v), falling back to v1 until this connection is lost", err)
-							nextProtocol = 1
-							setConnectionProtocolVersion(1)
-							continue
-						}
 						log.Println("POST fallback stopped:", err)
 						return
 					}
 					log.Println("WebSocket recovered from POST fallback")
-					activeProtocol = connectProtocol
-					nextProtocol = connectProtocol
-					setConnectionProtocolVersion(activeProtocol)
 					done := make(chan struct{})
 					readDone = done
-					go handleWebSocketMessages(conn, activeProtocol, done)
+					go handleWebSocketMessages(conn, done)
 				}
 			}
 
-			data := monitoring.GenerateReport()
-			if activeProtocol >= 2 {
-				data = v2.BuildReportPayload(data)
-			}
+			data := v2.BuildReportPayload(monitoring.GenerateReport())
 			err = conn.WriteMessage(websocket.TextMessage, data)
 			if err != nil {
 				log.Println("Failed to send WebSocket message:", err)
 				conn.Close()
 				conn = nil // Mark connection as dead
 				readDone = nil
-				resetConnectionProtocolVersion()
-				if requestedProtocolVersion() >= 2 {
-					nextProtocol = 2
-				}
 				continue
 			}
 		case <-heartbeatTicker.C:
@@ -133,10 +104,6 @@ func EstablishWebSocketConnection() {
 					conn.Close()
 					conn = nil // Mark connection as dead
 					readDone = nil
-					resetConnectionProtocolVersion()
-					if requestedProtocolVersion() >= 2 {
-						nextProtocol = 2
-					}
 				}
 			}
 		case <-readDone:
@@ -146,16 +113,11 @@ func EstablishWebSocketConnection() {
 				conn = nil
 			}
 			readDone = nil
-			activeProtocol = 0
-			resetConnectionProtocolVersion()
-			if requestedProtocolVersion() >= 2 {
-				nextProtocol = 2
-			}
 		}
 	}
 }
 
-func buildWebSocketEndpoint(_ int) string {
+func buildWebSocketEndpoint() string {
 	path := "/api/clients/v2/rpc"
 	websocketEndpoint := strings.TrimSuffix(flags.Endpoint, "/") + path
 	websocketEndpoint = "ws" + strings.TrimPrefix(websocketEndpoint, "http")
@@ -186,9 +148,6 @@ func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, 
 			ackIDs := snapshotV2AckEventIDs()
 			resp, err := postV2Request(v2.BuildReportRequest(reportID, monitoring.GenerateReport(), ackIDs))
 			if err != nil {
-				if shouldFallbackToV1(2, err) {
-					return nil, err
-				}
 				log.Println("Failed to POST v2 report:", err)
 				continue
 			}
@@ -198,9 +157,6 @@ func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, 
 			conn, err := connectWebSocket(websocketEndpoint)
 			if err == nil {
 				return conn, nil
-			}
-			if shouldFallbackToV1(2, err) {
-				return nil, err
 			}
 			log.Println("POST fallback WebSocket recovery failed:", err)
 		case err := <-pullErr:
@@ -225,13 +181,6 @@ func runV2PullLoop(ctx context.Context, errCh chan<- error) {
 		resp, err := postV2RequestContext(ctx, payload)
 		if err != nil {
 			if ctx.Err() != nil {
-				return
-			}
-			if shouldFallbackToV1(2, err) {
-				select {
-				case errCh <- err:
-				default:
-				}
 				return
 			}
 			log.Println("Failed to POST v2 pull:", err)
@@ -283,7 +232,6 @@ func postV2RequestContext(ctx context.Context, payload []byte) (*v2.Response, er
 	if err != nil {
 		return nil, err
 	}
-	resetV2ProtocolFailures(2)
 	return rpcResp, nil
 }
 
@@ -334,6 +282,9 @@ func addV2AckEventID(id string) {
 	}
 	v2AckMu.Lock()
 	defer v2AckMu.Unlock()
+	if len(v2AckEventIDs) >= maxV2SeenEvents {
+		v2AckEventIDs = v2AckEventIDs[len(v2AckEventIDs)-maxV2SeenEvents+1:]
+	}
 	v2AckEventIDs = append(v2AckEventIDs, id)
 }
 
@@ -345,6 +296,12 @@ func markV2EventSeen(id string) bool {
 	defer v2AckMu.Unlock()
 	if _, ok := v2SeenEvents[id]; ok {
 		return false
+	}
+	if len(v2SeenEvents) >= maxV2SeenEvents {
+		for oldID := range v2SeenEvents {
+			delete(v2SeenEvents, oldID)
+			break
+		}
 	}
 	v2SeenEvents[id] = struct{}{}
 	return true
@@ -366,7 +323,7 @@ func connectWebSocket(websocketEndpoint string) (*ws.SafeConn, error) {
 	return ws.NewSafeConn(conn), nil
 }
 
-func handleWebSocketMessages(conn *ws.SafeConn, protocolVersion int, done chan<- struct{}) {
+func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {
 	defer close(done)
 	for {
 		conn.SetReadLimit(1 << 20)
@@ -379,31 +336,17 @@ func handleWebSocketMessages(conn *ws.SafeConn, protocolVersion int, done chan<-
 			JSONRPC string      `json:"jsonrpc,omitempty"`
 			Method  string      `json:"method,omitempty"`
 			Params  interface{} `json:"params,omitempty"`
-			Message string      `json:"message"`
-			// Terminal
-			TerminalId string `json:"request_id,omitempty"`
-			// Remote Exec
-			ExecCommand string `json:"command,omitempty"`
-			ExecTaskID  string `json:"task_id,omitempty"`
-			// Ping
-			PingTaskID uint   `json:"ping_task_id,omitempty"`
-			PingType   string `json:"ping_type,omitempty"`
-			PingTarget string `json:"ping_target,omitempty"`
 		}
 		err = json.Unmarshal(message_raw, &message)
 		if err != nil {
 			log.Println("Bad ws message:", err)
 			continue
 		}
-		if message.JSONRPC == v2.Version && protocolVersion >= 2 {
+		if message.JSONRPC == v2.Version {
 			processV2Event(conn, message.Method, message.Params, "")
 			continue
 		}
-
-		if message.Message == "ping" || message.PingTaskID != 0 || message.PingType != "" || message.PingTarget != "" {
-			go NewPingTask(conn, protocolVersion, message.PingTaskID, message.PingType, message.PingTarget)
-			continue
-		}
+		log.Printf("ignored non-v2 websocket message")
 	}
 }
 
@@ -419,7 +362,7 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 			Target string `json:"ping_target"`
 		}
 		if err := v2.BindParams(params, &p); err == nil {
-			go NewPingTask(conn, 2, p.TaskID, p.Type, p.Target)
+			go NewPingTask(conn, p.TaskID, p.Type, p.Target)
 			return true
 		} else {
 			log.Printf("bad v2 ping params: %v", err)

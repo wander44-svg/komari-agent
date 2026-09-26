@@ -3,8 +3,6 @@ package v2
 import (
 	"encoding/json"
 	"time"
-
-	v1 "github.com/komari-monitor/komari-agent/protocol/v1"
 )
 
 const (
@@ -12,12 +10,7 @@ const (
 	MethodAgentReport     = "agent.report"
 	MethodAgentBasicInfo  = "agent.basicInfo"
 	MethodAgentPingResult = "agent.pingResult"
-	MethodAgentTaskResult = "agent.taskResult"
-	MethodAgentExec       = "agent.exec"
 	MethodAgentPing       = "agent.ping"
-	MethodAgentMessage    = "agent.message"
-	MethodAgentEvent      = "agent.event"
-	MethodAgentTerminal   = "agent.terminal.request"
 	MethodAgentPull       = "agent.pull"
 )
 
@@ -64,11 +57,11 @@ func NewRequest(id interface{}, method string, params interface{}) []byte {
 	return payload
 }
 
-func BuildReportPayload(report v1.ReportPayload) []byte {
+func BuildReportPayload(report []byte) []byte {
 	return NewNotification(MethodAgentReport, reportParams{Report: json.RawMessage(report)})
 }
 
-func BuildReportRequest(id interface{}, report v1.ReportPayload, ackEventIDs []string) []byte {
+func BuildReportRequest(id interface{}, report []byte, ackEventIDs []string) []byte {
 	return NewRequest(id, MethodAgentReport, reportParams{Report: json.RawMessage(report), AckEventIDs: ackEventIDs})
 }
 

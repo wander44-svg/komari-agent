@@ -4,19 +4,13 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
-	"runtime"
 	"strings"
 
 	cpuid "github.com/klauspost/cpuid/v2"
 )
 
 func Virtualized() string {
-	// Windows: use CPUID to detect hypervisor presence and vendor.
-	if runtime.GOOS == "windows" {
-		return detectByCPUID()
-	}
-
-	// Linux/others: prefer systemd-detect-virt if available; fallback to CPUID.
+	// Prefer systemd-detect-virt on Linux; fall back to CPUID.
 	if out, err := exec.Command("systemd-detect-virt").Output(); err == nil {
 		virt := strings.TrimSpace(string(out))
 		if virt != "" {
