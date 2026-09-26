@@ -23,6 +23,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Synchronize Go module metadata
+        run: go mod tidy
+
       - name: Build binary
         env:
           GOOS: ${{ matrix.goos }}
