@@ -148,7 +148,12 @@ log_config "Installation configuration:"
 log_config "  Service name: ${GREEN}$service_name${NC}"
 log_config "  Install directory: ${GREEN}$target_dir${NC}"
 log_config "  Binary arguments: configured (sensitive values hidden)"
-log_config "  Agent channel: ${GREEN}Latest Snapshot${NC}"
+agent_version="${KOMARI_AGENT_VERSION:-1.4.4}"
+if [[ ! "$agent_version" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    log_error "Invalid agent version"
+    exit 1
+fi
+log_config "  Agent release: ${GREEN}${agent_version}${NC}"
 echo ""
 
 # Function to uninstall the previous installation
@@ -211,11 +216,8 @@ install_dependencies() {
         elif command -v apk >/dev/null 2>&1; then
             log_info "Using apk to install dependencies..."
             apk add $missing_deps
-        elif command -v brew >/dev/null 2>&1; then
-            log_info "Using Homebrew to install dependencies..."
-            brew install $missing_deps
         else
-            log_error "No supported package manager found (apt/yum/apk/brew)"
+            log_error "No supported Linux package manager found (apt/yum/apk)"
             exit 1
         fi
         
@@ -254,21 +256,8 @@ case $arch in
 esac
 log_info "Detected OS: ${GREEN}$os_name${NC}, Architecture: ${GREEN}$arch${NC}"
 
-# Resolve the newest Linux-only optimal snapshot. GitHub's latest/download
-# endpoint ignores prereleases, so it cannot be used for this branch.
-log_info "Resolving latest Snapshot release..."
-snapshot_tag=$(curl -fsSL "https://api.github.com/repos/wander44-svg/komari-agent/releases" \
-    | grep '"tag_name"' \
-    | grep 'Snapshot-' \
-    | head -1 \
-    | sed -e 's/.*"tag_name": *"//' -e 's/".*//')
-if [ -z "$snapshot_tag" ]; then
-    log_error "Unable to resolve the latest Snapshot release"
-    exit 1
-fi
-
 file_name="komari-agent-${os_name}-${arch}"
-download_url="https://github.com/wander44-svg/komari-agent/releases/download/${snapshot_tag}/${file_name}"
+download_url="https://github.com/wander44-svg/komari-agent/releases/download/${agent_version}/${file_name}"
 
 log_step "Creating installation directory: ${GREEN}$target_dir${NC}"
 mkdir -p "$target_dir"
@@ -288,7 +277,7 @@ umask "$old_umask"
 runtime_args=("--config" "$config_path" "${komari_args[@]}")
 
 # Download binary
-log_step "Downloading $file_name (${snapshot_tag}) directly..."
+log_step "Downloading $file_name (release ${agent_version}) directly..."
 log_info "URL: ${CYAN}$download_url${NC}"
 if ! curl --fail --location --retry 3 --proto '=https' --tlsv1.2 -o "$komari_agent_path" "$download_url"; then
     log_error "Download failed"
@@ -501,82 +490,6 @@ EOF
     /etc/init.d/${service_name} enable
     /etc/init.d/${service_name} start
     log_success "procd service configured and started"
-elif [ "$init_system" = "launchd" ]; then
-    # macOS launchd service configuration
-    log_info "Using launchd for service management"
-    
-    # Determine if this should be a system or user service based on installation directory
-    if [[ "$target_dir" =~ ^/Users/.* ]] || [ "$EUID" -ne 0 ]; then
-        # User-level service (LaunchAgent)
-        plist_dir="$HOME/Library/LaunchAgents"
-        plist_file="$plist_dir/com.komari.${service_name}.plist"
-        log_info "Installing as user-level service (LaunchAgent)"
-        mkdir -p "$plist_dir"
-        service_user="$(whoami)"
-        log_dir="$HOME/Library/Logs"
-    else
-        # System-level service (LaunchDaemon)
-        plist_dir="/Library/LaunchDaemons"
-        plist_file="$plist_dir/com.komari.${service_name}.plist"
-        log_info "Installing as system-level service (LaunchDaemon)"
-        service_user="root"
-        log_dir="/var/log"
-    fi
-    
-    # Create the launchd plist file
-    cat > "$plist_file" << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.komari.${service_name}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${komari_agent_path}</string>
-EOF
-    
-    # Add program arguments if provided
-    if [ -n "$runtime_args" ]; then
-        printf '%s\n' "${runtime_args[@]}" | xargs -n1 printf "        <string>%s</string>\n" >> "$plist_file"
-    fi
-    
-    cat >> "$plist_file" << EOF
-    </array>
-    <key>WorkingDirectory</key>
-    <string>${target_dir}</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>UserName</key>
-    <string>${service_user}</string>
-    <key>StandardOutPath</key>
-    <string>${log_dir}/${service_name}.log</string>
-    <key>StandardErrorPath</key>
-    <string>${log_dir}/${service_name}.log</string>
-</dict>
-</plist>
-EOF
-    
-    # Load and start the service
-    if [[ "$target_dir" =~ ^/Users/.* ]] || [ "$EUID" -ne 0 ]; then
-        # User-level service
-        if launchctl bootstrap gui/$(id -u) "$plist_file"; then
-            log_success "User-level launchd service configured and started"
-        else
-            log_error "Failed to load user-level launchd service"
-            exit 1
-        fi
-    else
-        # System-level service
-        if launchctl bootstrap system "$plist_file"; then
-            log_success "System-level launchd service configured and started"
-        else
-            log_error "Failed to load system-level launchd service"
-            exit 1
-        fi
-    fi
 elif [ "$init_system" = "upstart" ]; then
     # Upstart service configuration
     log_info "Using upstart for service management"
