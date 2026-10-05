@@ -5,6 +5,10 @@ and sends credentials exclusively as `Authorization: Bearer`. It provides
 monitoring data and ping measurements; remote shell, file operations,
 auto-discovery, and auto-update are not included.
 
+The installer resolves the latest non-prerelease GitHub Release automatically
+by default. Set `KOMARI_AGENT_VERSION` to an explicit tag when a pinned
+installation is required, for example `KOMARI_AGENT_VERSION=1.4.4-fix1`.
+
 ## 配置方式
 
 agent 参数可以通过命令行参数、环境变量或 JSON 配置文件传入。

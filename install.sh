@@ -40,6 +40,7 @@ log_config() {
 # Default values
 service_name="komari-agent"
 target_dir="/opt/komari"
+agent_repo="wander44-svg/komari-agent"
  
 
 # Linux-only monitoring agent. Other operating systems are rejected before
@@ -148,8 +149,8 @@ log_config "Installation configuration:"
 log_config "  Service name: ${GREEN}$service_name${NC}"
 log_config "  Install directory: ${GREEN}$target_dir${NC}"
 log_config "  Binary arguments: configured (sensitive values hidden)"
-agent_version="${KOMARI_AGENT_VERSION:-1.4.4}"
-if [[ ! "$agent_version" =~ ^[A-Za-z0-9._-]+$ ]]; then
+agent_version="${KOMARI_AGENT_VERSION:-latest}"
+if [[ "$agent_version" != "latest" && ! "$agent_version" =~ ^[A-Za-z0-9._-]+$ ]]; then
     log_error "Invalid agent version"
     exit 1
 fi
@@ -238,7 +239,25 @@ install_dependencies() {
 # Install dependencies
 install_dependencies
 
- 
+# Resolve the latest non-prerelease GitHub Release only after curl is
+# available. This keeps the one-click installer current without silently
+# switching production installs to a Snapshot prerelease.
+if [ "$agent_version" = "latest" ]; then
+    log_step "Resolving the latest stable Agent release..."
+    latest_release=$(curl --fail --silent --show-error --location --retry 3 \
+        --proto '=https' --tlsv1.2 \
+        -H 'Accept: application/vnd.github+json' \
+        "https://api.github.com/repos/${agent_repo}/releases/latest" \
+        | sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
+        | head -n 1)
+    if [ -z "$latest_release" ] || [[ ! "$latest_release" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        log_error "Unable to resolve the latest stable Agent release"
+        exit 1
+    fi
+    agent_version="$latest_release"
+    log_config "  Resolved Agent release: ${GREEN}${agent_version}${NC}"
+fi
+
 
 # Only the published Linux targets are supported.
 arch=$(uname -m)
