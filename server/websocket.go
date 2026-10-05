@@ -5,11 +5,13 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -138,27 +140,45 @@ func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, 
 
 	reportTicker := time.NewTicker(time.Duration(interval * float64(time.Second)))
 	defer reportTicker.Stop()
-	reconnectTicker := time.NewTicker(time.Duration(flags.ReconnectInterval) * time.Second)
-	defer reconnectTicker.Stop()
+	reconnectDelay := time.Duration(flags.ReconnectInterval) * time.Second
+	if reconnectDelay <= 0 {
+		reconnectDelay = 5 * time.Second
+	}
+	reconnectTimer := time.NewTimer(reconnectDelay)
+	defer reconnectTimer.Stop()
+	var reportFailures int
+	var reportRetryAt time.Time
+	var websocketFailures int
 
 	for {
 		select {
 		case <-reportTicker.C:
+			if time.Now().Before(reportRetryAt) {
+				continue
+			}
 			reportID := fmt.Sprintf("report-%d", time.Now().UnixNano())
 			ackIDs := snapshotV2AckEventIDs()
 			resp, err := postV2Request(v2.BuildReportRequest(reportID, monitoring.GenerateReport(), ackIDs))
 			if err != nil {
-				log.Println("Failed to POST v2 report:", err)
+				reportFailures++
+				delay := v2RetryDelay(err, reportFailures)
+				reportRetryAt = time.Now().Add(delay)
+				log.Printf("Failed to POST v2 report (retry in %s): %v", delay, err)
 				continue
 			}
+			reportFailures = 0
+			reportRetryAt = time.Time{}
 			clearV2AckEventIDs(ackIDs)
 			processV2ResponseEvents(resp)
-		case <-reconnectTicker.C:
+		case <-reconnectTimer.C:
 			conn, err := connectWebSocket(websocketEndpoint)
 			if err == nil {
 				return conn, nil
 			}
-			log.Println("POST fallback WebSocket recovery failed:", err)
+			websocketFailures++
+			delay := v2RetryDelay(err, websocketFailures)
+			log.Printf("POST fallback WebSocket recovery failed (retry in %s): %v", delay, err)
+			reconnectTimer.Reset(delay)
 		case err := <-pullErr:
 			return nil, err
 		}
@@ -166,6 +186,7 @@ func runPostFallback(websocketEndpoint string, interval float64) (*ws.SafeConn, 
 }
 
 func runV2PullLoop(ctx context.Context, errCh chan<- error) {
+	var failures int
 	for {
 		select {
 		case <-ctx.Done():
@@ -183,10 +204,15 @@ func runV2PullLoop(ctx context.Context, errCh chan<- error) {
 			if ctx.Err() != nil {
 				return
 			}
-			log.Println("Failed to POST v2 pull:", err)
-			time.Sleep(time.Duration(flags.ReconnectInterval) * time.Second)
+			failures++
+			delay := v2RetryDelay(err, failures)
+			log.Printf("Failed to POST v2 pull (retry in %s): %v", delay, err)
+			if !waitForRetry(ctx, delay) {
+				return
+			}
 			continue
 		}
+		failures = 0
 		clearV2AckEventIDs(ackIDs)
 		processV2ResponseEvents(resp)
 	}
@@ -215,7 +241,7 @@ func postV2RequestContext(ctx context.Context, payload []byte) (*v2.Response, er
 	if compressed {
 		req.Header.Set("Content-Encoding", "gzip")
 	}
-	client := dnsresolver.GetHTTPClientWithPreference(35*time.Second, flags.PreferIPVersion)
+	client := dnsresolver.GetHTTPClientWithPreference(45*time.Second, flags.PreferIPVersion)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -312,6 +338,9 @@ func connectWebSocket(websocketEndpoint string) (*ws.SafeConn, error) {
 
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer "+flags.Token)
+	if origin := buildWebSocketOrigin(); origin != "" {
+		headers.Set("Origin", origin)
+	}
 	conn, resp, err := dialer.Dial(websocketEndpoint, headers)
 	if err != nil {
 		if resp != nil && resp.StatusCode != 101 {
@@ -321,6 +350,51 @@ func connectWebSocket(websocketEndpoint string) (*ws.SafeConn, error) {
 	}
 
 	return ws.NewSafeConn(conn), nil
+}
+
+func buildWebSocketOrigin() string {
+	parsed, err := url.Parse(strings.TrimSpace(flags.Endpoint))
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+func v2RetryDelay(err error, failures int) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	var statusErr *httpStatusError
+	if errors.As(err, &statusErr) && (statusErr.StatusCode == http.StatusUnauthorized || statusErr.StatusCode == http.StatusForbidden) {
+		// Authentication and Origin failures will not be fixed by tight retries.
+		return 30 * time.Second
+	}
+	base := time.Duration(flags.ReconnectInterval) * time.Second
+	if base <= 0 {
+		base = 5 * time.Second
+	}
+	if failures > 4 {
+		failures = 4
+	}
+	delay := base * time.Duration(1<<(failures-1))
+	if delay > 30*time.Second {
+		return 30 * time.Second
+	}
+	return delay
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func handleWebSocketMessages(conn *ws.SafeConn, done chan<- struct{}) {

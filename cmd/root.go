@@ -52,8 +52,9 @@ var RootCmd = &cobra.Command{
 		if strings.TrimSpace(flags.Endpoint) == "" || strings.TrimSpace(flags.Token) == "" {
 			return fmt.Errorf("endpoint and token are required")
 		}
-		if flags.PreferIPVersion != "" && flags.PreferIPVersion != "4" && flags.PreferIPVersion != "6" {
-			return fmt.Errorf("invalid --prefer-ip-version value %q: expected 4 or 6", flags.PreferIPVersion)
+		flags.PreferIPVersion = strings.ToLower(strings.TrimSpace(flags.PreferIPVersion))
+		if flags.PreferIPVersion != "" && flags.PreferIPVersion != "auto" && flags.PreferIPVersion != "4" && flags.PreferIPVersion != "6" {
+			return fmt.Errorf("invalid --prefer-ip-version value %q: expected auto, 4, or 6", flags.PreferIPVersion)
 		}
 		// 捕获中止信号，优雅退出
 		stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -148,7 +149,7 @@ func init() {
 	RootCmd.PersistentFlags().BoolVar(&flags.GetIpAddrFromNic, "get-ip-addr-from-nic", false, "Get IP address from network interface")
 	RootCmd.PersistentFlags().StringVar(&flags.ConfigFile, "config", "", "Path to the configuration file")
 	RootCmd.PersistentFlags().BoolVar(&flags.DisableCompression, "disable-compression", false, "Disable v2 gzip/permessage-deflate compression")
-	RootCmd.PersistentFlags().StringVar(&flags.PreferIPVersion, "prefer-ip-version", "", "Prefer IP version for dashboard connections: 4 or 6")
+	RootCmd.PersistentFlags().StringVar(&flags.PreferIPVersion, "prefer-ip-version", "", "Dashboard connection IP mode: auto (default), 4, or 6")
 	RootCmd.PersistentFlags().ParseErrorsWhitelist.UnknownFlags = true
 }
 

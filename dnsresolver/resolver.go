@@ -33,11 +33,13 @@ var (
 	// CustomDNSServer 自定义DNS服务器，可以通过命令行参数设置
 	CustomDNSServer string
 
-	preferV4Once sync.Once
-	hasIPv4      bool
 	httpClientMu sync.Mutex
 	httpClients  = make(map[httpClientKey]*http.Client)
 )
+
+// happyEyeballsDelay lets an unavailable address family fall back quickly
+// without sending duplicate application requests.
+const happyEyeballsDelay = 250 * time.Millisecond
 
 type httpClientKey struct {
 	timeout          time.Duration
@@ -141,19 +143,7 @@ func buildTransportWithPreference(timeout time.Duration, tlsConfig *tls.Config, 
 			if err != nil {
 				return nil, err
 			}
-			sortIPsByPreference(ips, preferIPVersion)
-			for _, ip := range ips {
-				dialer := &net.Dialer{
-					Timeout:   timeout,
-					KeepAlive: 30 * time.Second,
-					DualStack: true,
-				}
-				conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
-				if err == nil {
-					return conn, nil
-				}
-			}
-			return nil, fmt.Errorf("failed to dial to any of the resolved IPs")
+			return dialResolved(ctx, network, ips, port, timeout, preferIPVersion)
 		},
 		MaxIdleConns:          32,
 		MaxIdleConnsPerHost:   4,
@@ -170,8 +160,8 @@ func GetHTTPClient(timeout time.Duration) *http.Client {
 	return getHTTPClient(timeout, "")
 }
 
-// GetHTTPClientWithPreference 返回一个使用自定义解析器并按指定 IP 版本排序的 HTTP 客户端。
-// preferIPVersion 为 "4" 或 "6" 时固定优先对应地址；为空时保留自动选择逻辑。
+// GetHTTPClientWithPreference 返回一个使用自定义解析器的 HTTP 客户端。
+// preferIPVersion 为 "4" 或 "6" 时固定使用对应优先级；为空/auto 时启用双栈竞速。
 func GetHTTPClientWithPreference(timeout time.Duration, preferIPVersion string) *http.Client {
 	return getHTTPClient(timeout, normalizeIPVersionPreference(preferIPVersion))
 }
@@ -211,14 +201,13 @@ func GetNetDialer(timeout time.Duration) *net.Dialer {
 
 // GetDialContext 返回一个自定义 DialContext：
 // - 使用自定义解析器解析主机名
-// - 根据本机网络自动选择 IPv4 或 IPv6 优先
-// - 逐个 IP 进行连接尝试，直到成功或全部失败
+// - 自动模式使用 Happy Eyeballs，同时兼容纯 IPv4/纯 IPv6 主机
 func GetDialContext(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return GetDialContextWithPreference(timeout, "")
 }
 
 // GetDialContextWithPreference 返回一个可显式指定 IPv4/IPv6 优先级的 DialContext。
-// preferIPVersion 为 "4" 或 "6" 时固定优先对应地址；为空时保留自动选择逻辑。
+// preferIPVersion 为 "4" 或 "6" 时固定优先对应地址；为空/auto 时启用双栈竞速。
 func GetDialContextWithPreference(timeout time.Duration, preferIPVersion string) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
@@ -242,25 +231,12 @@ func GetDialContextWithPreference(timeout time.Duration, preferIPVersion string)
 			return nil, err
 		}
 
-		sortIPsByPreference(ips, preferIPVersion)
-
-		// 逐个 IP 尝试连接
-		for _, ip := range ips {
-			d := &net.Dialer{
-				Timeout:   timeout,
-				KeepAlive: 30 * time.Second,
-				DualStack: true,
-			}
-			c, err := d.DialContext(ctx, network, net.JoinHostPort(ip, port))
-			if err == nil {
-				return c, nil
-			}
-		}
-		return nil, fmt.Errorf("failed to dial to any of the resolved IPs")
+		return dialResolved(ctx, network, ips, port, timeout, preferIPVersion)
 	}
 }
 
 func normalizeIPVersionPreference(preferIPVersion string) string {
+	preferIPVersion = strings.ToLower(strings.TrimSpace(preferIPVersion))
 	if preferIPVersion == "4" || preferIPVersion == "6" {
 		return preferIPVersion
 	}
@@ -270,12 +246,7 @@ func normalizeIPVersionPreference(preferIPVersion string) string {
 func sortIPsByPreference(ips []string, preferIPVersion string) {
 	preferIPVersion = normalizeIPVersionPreference(preferIPVersion)
 	if preferIPVersion == "" {
-		// 根据本机是否具备 IPv4 动态排序
-		if preferIPv4First() {
-			preferIPVersion = "4"
-		} else {
-			preferIPVersion = "6"
-		}
+		return
 	}
 
 	preferred := make([]string, 0, len(ips))
@@ -294,33 +265,109 @@ func sortIPsByPreference(ips []string, preferIPVersion string) {
 	copy(ips[n:], others)
 }
 
-// preferIPv4First 检测本机是否存在可用的 IPv4 地址，若没有则在连接尝试中优先 IPv6
-func preferIPv4First() bool {
-	preferV4Once.Do(func() {
-		ifaces, _ := net.Interfaces()
-		for _, iface := range ifaces {
-			if (iface.Flags&net.FlagUp) == 0 || (iface.Flags&net.FlagLoopback) != 0 {
-				continue
+type dialResult struct {
+	conn net.Conn
+	err  error
+}
+
+// dialResolved establishes one connection to a set of resolved addresses.
+// Explicit 4/6 preferences remain deterministic. Auto mode starts IPv6 and
+// then IPv4 (with a short stagger), so a broken IPv6 route cannot block IPv4.
+func dialResolved(ctx context.Context, network string, ips []string, port string, timeout time.Duration, preferIPVersion string) (net.Conn, error) {
+	ordered := deduplicateIPs(ips)
+	if len(ordered) == 0 {
+		return nil, fmt.Errorf("failed to resolve any address")
+	}
+	preferIPVersion = normalizeIPVersionPreference(preferIPVersion)
+	if preferIPVersion != "" {
+		sortIPsByPreference(ordered, preferIPVersion)
+		var lastErr error
+		for _, ip := range ordered {
+			conn, err := dialOne(ctx, network, ip, port, timeout)
+			if err == nil {
+				return conn, nil
 			}
-			addrs, _ := iface.Addrs()
-			for _, a := range addrs {
-				var ip net.IP
-				switch v := a.(type) {
-				case *net.IPNet:
-					ip = v.IP
-				case *net.IPAddr:
-					ip = v.IP
-				}
-				if ip == nil || ip.IsLoopback() {
-					continue
-				}
-				if ip.To4() != nil {
-					hasIPv4 = true
+			lastErr = err
+		}
+		return nil, fmt.Errorf("failed to dial to any of the resolved IPs: %w", lastErr)
+	}
+
+	ordered = happyEyeballsOrder(ordered)
+	dialCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan dialResult, len(ordered))
+	for index, ip := range ordered {
+		go func(index int, ip string) {
+			if index > 0 {
+				timer := time.NewTimer(time.Duration(index) * happyEyeballsDelay)
+				defer timer.Stop()
+				select {
+				case <-timer.C:
+				case <-dialCtx.Done():
+					results <- dialResult{err: dialCtx.Err()}
 					return
 				}
 			}
+			conn, err := dialOne(dialCtx, network, ip, port, timeout)
+			results <- dialResult{conn: conn, err: err}
+		}(index, ip)
+	}
+
+	var lastErr error
+	for range ordered {
+		select {
+		case result := <-results:
+			if result.err == nil {
+				cancel()
+				return result.conn, nil
+			}
+			lastErr = result.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
-		hasIPv4 = false
-	})
-	return hasIPv4
+	}
+	return nil, fmt.Errorf("failed to dial to any of the resolved IPs: %w", lastErr)
+}
+
+func dialOne(ctx context.Context, network, ip, port string, timeout time.Duration) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second, DualStack: true}
+	return dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
+}
+
+func deduplicateIPs(ips []string) []string {
+	seen := make(map[string]struct{}, len(ips))
+	result := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		if _, ok := seen[ip]; ok {
+			continue
+		}
+		seen[ip] = struct{}{}
+		result = append(result, ip)
+	}
+	return result
+}
+
+func happyEyeballsOrder(ips []string) []string {
+	v4 := make([]string, 0, len(ips))
+	v6 := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		parsed := net.ParseIP(ip)
+		if parsed != nil && parsed.To4() != nil {
+			v4 = append(v4, ip)
+		} else {
+			v6 = append(v6, ip)
+		}
+	}
+	ordered := make([]string, 0, len(ips))
+	for len(v4) > 0 || len(v6) > 0 {
+		if len(v6) > 0 {
+			ordered = append(ordered, v6[0])
+			v6 = v6[1:]
+		}
+		if len(v4) > 0 {
+			ordered = append(ordered, v4[0])
+			v4 = v4[1:]
+		}
+	}
+	return ordered
 }
