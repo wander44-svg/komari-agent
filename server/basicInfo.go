@@ -59,6 +59,9 @@ func uploadBasicInfo() error {
 		"gpu_name":           monitoring.GpuName(),
 		"virtualization":     monitoring.Virtualized(),
 		"version":            version.CurrentVersion,
+		// Report the local traffic reset day so the dashboard/theme can show
+		// the same setting that is used when calculating network totals.
+		"month_rotate": flags.MonthRotate,
 	}
 
 	return tryUploadData(data)
